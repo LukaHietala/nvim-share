@@ -1,32 +1,41 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <string.h>
 
 #define MAX_CLIENTS 64
 
 struct client {
-	int fd;
 	int is_host;
 };
 
-static void remove_client(int idx, struct pollfd *fds, struct client *clients,
-			  int *nfds, int *host_fd)
-{
-	close(fds[idx].fd);
-	if (clients[idx].is_host)
-		*host_fd = -1;
+struct server {
+	struct pollfd fds[MAX_CLIENTS];
+	struct client clients[MAX_CLIENTS];
+	int nfds;
+	int host_fd;
+};
 
-	fds[idx] = fds[*nfds - 1];
-	clients[idx] = clients[*nfds - 1];
-	(*nfds)--;
+static void remove_client(struct server *srv, int idx)
+{
+	int fd = srv->fds[idx].fd;
+	printf("Client on socket %d disconnected\n", fd);
+	close(fd);
+
+	if (srv->clients[idx].is_host)
+		srv->host_fd = -1;
+
+	/* Move last element to current position to fill gap */
+	srv->fds[idx] = srv->fds[srv->nfds - 1];
+	srv->clients[idx] = srv->clients[srv->nfds - 1];
+	srv->nfds--;
 }
 
-static void accept_new_connection(int server_fd, struct pollfd *fds,
-				  struct client *clients, int *nfds,
-				  int *host_fd)
+static void accept_connection(int server_fd, struct server *srv)
 {
 	int new_fd = accept(server_fd, NULL, NULL);
 	if (new_fd < 0) {
@@ -34,29 +43,67 @@ static void accept_new_connection(int server_fd, struct pollfd *fds,
 		return;
 	}
 
-	if (*nfds >= MAX_CLIENTS) {
-		fprintf(stderr, "Too many clients %d\n", new_fd);
+	if (srv->nfds >= MAX_CLIENTS) {
+		fprintf(stderr, "Too many clients\n");
 		close(new_fd);
 		return;
 	}
 
 	int opt = 1;
 	setsockopt(new_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-	fds[*nfds].fd = new_fd;
-	fds[*nfds].events = POLLIN;
-	clients[*nfds].fd = new_fd;
-	clients[*nfds].is_host = (*host_fd < 0);
-	if (*host_fd < 0)
-		*host_fd = new_fd;
-	(*nfds)++;
 
-	printf("New connection on socket %d%s\n", new_fd,
-	       clients[*nfds - 1].is_host ? " (host)" : "");
+	srv->fds[srv->nfds].fd = new_fd;
+	srv->fds[srv->nfds].events = POLLIN;
+
+	int is_host = (srv->host_fd < 0);
+	srv->clients[srv->nfds].is_host = is_host;
+	if (is_host)
+		srv->host_fd = new_fd;
+
+	printf("New connection: %d%s\n", new_fd, is_host ? " (host)" : "");
+	srv->nfds++;
+}
+
+static void handle_query(int client_fd, struct server *srv)
+{
+	char resp[1024];
+	int len = 0;
+
+	/* Skip index 0 (server socket) */
+	for (int i = 1; i < srv->nfds && len < (int)sizeof(resp); ++i) {
+		int fd = srv->fds[i].fd;
+		int is_host = srv->clients[i].is_host;
+		len += snprintf(resp + len, sizeof(resp) - len, "%d%s\n", fd,
+				is_host ? " HOST" : "");
+	}
+	send(client_fd, resp, (size_t)len, 0);
+}
+
+static int handle_client_data(struct server *srv, int idx)
+{
+	char buf[1024];
+	ssize_t n = recv(srv->fds[idx].fd, buf, sizeof(buf) - 1, 0);
+
+	if (n <= 0) {
+		remove_client(srv, idx);
+		return -1;
+	}
+
+	buf[n] = '\0';
+	printf("got %zd bytes from %d: %s\n", n, srv->fds[idx].fd, buf);
+
+	if (strncmp(buf, "QUERY", 5) == 0)
+		handle_query(srv->fds[idx].fd, srv);
+	return 0;
 }
 
 int main(void)
 {
 	int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (server_fd < 0) {
+		fprintf(stderr, "Socket creation failed\n");
+		return 1;
+	}
 
 	int opt = 1;
 	setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -66,65 +113,40 @@ int main(void)
 				    .sin_port = htons(8080),
 				    .sin_addr.s_addr = INADDR_ANY };
 
-	bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));
-	listen(server_fd, MAX_CLIENTS);
+	if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		fprintf(stderr, "Bind failed\n");
+		return 1;
+	}
 
-	struct pollfd fds[MAX_CLIENTS] = { 0 };
-	struct client clients[MAX_CLIENTS] = { 0 };
-	fds[0] = (struct pollfd){ .fd = server_fd, .events = POLLIN };
-	clients[0] = (struct client){ .fd = server_fd, .is_host = 0 };
-	int nfds = 1;
+	if (listen(server_fd, MAX_CLIENTS) < 0) {
+		fprintf(stderr, "Listen failed\n");
+		return 1;
+	}
 
-	int host_fd = -1;
+	printf("Listening...\n");
 
-	while (poll(fds, (nfds_t)nfds, -1) >= 0) {
-		for (int i = 0; i < nfds; ++i) {
-			/* Drop connection if error, hangup, or invalid request
-			 * TODO: fix problem after one POLL ERR all subsequent
-			 * polls fail
-			 */
-			if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-				fprintf(stderr, "Client on socket %d dropped (%s)\n",
-				       fds[i].fd,
-				       (fds[i].revents & POLLERR) ? "POLLERR" :
-				       (fds[i].revents & POLLHUP) ? "POLLHUP" :
-								    "POLLNVAL");
-				remove_client(i, fds, clients, &nfds, &host_fd);
+	struct server srv = { .nfds = 1, .host_fd = -1 };
+	srv.fds[0].fd = server_fd;
+	srv.fds[0].events = POLLIN;
+
+	while (poll(srv.fds, (nfds_t)srv.nfds, -1) >= 0) {
+		for (int i = 0; i < srv.nfds; ++i) {
+			if (srv.fds[i].revents &
+			    (POLLERR | POLLHUP | POLLNVAL)) {
+				remove_client(&srv, i);
 				i--;
 				continue;
 			}
 
-			/* If no data, skip */
-			if (!(fds[i].revents & POLLIN))
-				continue;
-
-			/* New connection */
-			if (fds[i].fd == server_fd) {
-				accept_new_connection(server_fd, fds, clients,
-						      &nfds, &host_fd);
-				continue;
+			if (srv.fds[i].revents & POLLIN) {
+				if (srv.fds[i].fd == server_fd)
+					accept_connection(server_fd, &srv);
+				else if (handle_client_data(&srv, i) < 0)
+					i--;
 			}
-
-			/* Receive data from client */
-			char buf[512];
-			ssize_t n = recv(fds[i].fd, buf, sizeof(buf), 0);
-			if (n <= 0) {
-				printf("Client on socket %d disconnected\n",
-				       fds[i].fd);
-				remove_client(i, fds, clients, &nfds, &host_fd);
-				i--;
-				continue;
-			}
-
-			printf("Received %zd bytes from socket %d: %.*s\n", n,
-			       fds[i].fd, (int)n, buf);
 		}
 	}
 
-	for (int i = 0; i < nfds; ++i)
-		close(fds[i].fd);
-
 	close(server_fd);
-
 	return 0;
 }
