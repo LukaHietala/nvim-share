@@ -84,8 +84,11 @@ int main(void)
 			 * polls fail
 			 */
 			if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-				printf("Client on socket %d dropped\n",
-				       fds[i].fd);
+				fprintf(stderr, "Client on socket %d dropped (%s)\n",
+				       fds[i].fd,
+				       (fds[i].revents & POLLERR) ? "POLLERR" :
+				       (fds[i].revents & POLLHUP) ? "POLLHUP" :
+								    "POLLNVAL");
 				remove_client(i, fds, clients, &nfds, &host_fd);
 				i--;
 				continue;
