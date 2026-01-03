@@ -39,7 +39,14 @@ local function connect(host, callback)
 	M.client = uv.new_tcp()
 	M.client:connect(host, PORT, function(err)
 		if err then
-			vim.schedule(function() print(err) end)
+			vim.schedule(function()
+                print(err)
+                -- Close connection on error to allow retrying
+                if M.client then
+                    M.client:close()
+                    M.client = nil
+                end
+            end)
 			return
 		end
 		
@@ -48,6 +55,11 @@ local function connect(host, callback)
 end
 
 function M.server_start()
+    if M.client then
+        print("You're already connected")
+        return
+    end
+
 	-- Start the server
 	local job_id = vim.fn.jobstart({"./build/server"}, {
 		detach = false,
@@ -65,6 +77,7 @@ function M.server_start()
     vim.defer_fn(function()
 		connect("127.0.0.1", function()
 			print("Server is ready")
+            M.role = "HOST"
         end)
     end, 500)
 end
