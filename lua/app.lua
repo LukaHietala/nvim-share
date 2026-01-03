@@ -1,4 +1,11 @@
+local uv = vim.uv
+
 local M = {}
+
+M.role = nil  -- "HOST" or "CLIENT"
+M.client = nil  -- TCP client
+
+local PORT = 8080
 
 -- Sends raw data over TCP
 local function send_raw(data)
@@ -27,5 +34,43 @@ local function broadcast_update(path, content, exclude_id)
 		end
 	end
 end
+
+local function connect(host, callback)
+	M.client = uv.new_tcp()
+	M.client:connect(host, PORT, function(err)
+		if err then
+			vim.schedule(function() print(err) end)
+			return
+		end
+		
+		vim.schedule(callback)
+	end)
+end
+
+function M.server_start()
+	-- Start the server
+	local job_id = vim.fn.jobstart({"./build/server"}, {
+		detach = false,
+		on_exit = function() print("Server exited") end
+	})
+
+	-- Kill server on exit
+	vim.api.nvim_create_autocmd("VimLeave", {
+		callback = function()
+			vim.fn.jobstop(job_id)
+		end
+	})
+
+    -- Connect to server after a short delay to allow it to start up
+    vim.defer_fn(function()
+		connect("127.0.0.1", function()
+			print("Server is ready")
+        end)
+    end, 500)
+end
+
+vim.api.nvim_create_user_command("TcpServerStart", function()
+    M.server_start()
+end, {})
 
 return M
