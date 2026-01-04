@@ -9,8 +9,11 @@ vim.api.nvim_create_user_command("ServerStart", function()
 end, {})
 
 vim.api.nvim_create_user_command("ServerJoin", function(opts)
-	require("nvim-tcp").server_join(opts.args ~= "" and opts.args or nil)
-end, { nargs = "?" })
+	local args = opts.fargs
+	local ip = args[1]
+	local sync_dir = args[2]
+	require("nvim-tcp").server_join(ip, sync_dir)
+end, { nargs = "*" })
 
 vim.api.nvim_create_user_command("ReviewChanges", function()
 	require("nvim-tcp").review_changes()

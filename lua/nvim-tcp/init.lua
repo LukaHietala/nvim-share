@@ -15,10 +15,6 @@ M.config = {
 	sync_dir = nil,
 }
 
-function M.setup(opts)
-	M.config = vim.tbl_deep_extend("force", M.config, opts or {})
-end
-
 local PORT = 8080
 
 -- Broadcasts an update to all connected clients except exclude_id (usually the sender)
@@ -349,10 +345,15 @@ function M.server_start()
 	end, 500)
 end
 
-function M.server_join(ip)
+function M.server_join(ip, sync_dir)
 	if network.client then
 		print("Already connected or server running")
 		return
+	end
+
+	if sync_dir then
+		M.config.sync_to_disk = true
+		M.config.sync_dir = sync_dir
 	end
 
 	vim.ui.input({ prompt = "Enter your name: " }, function(name)
