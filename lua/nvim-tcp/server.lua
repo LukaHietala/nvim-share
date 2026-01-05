@@ -21,7 +21,6 @@ function M.stop()
 	M.next_client_id = 1
 end
 
-
 -- Create a TCP server with libuv
 -- https://docs.libuv.org/en/v1.x/tcp.html
 -- https://neovim.io/doc/user/luvref.html#uv_tcp_t

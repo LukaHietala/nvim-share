@@ -1,7 +1,7 @@
 local uv = vim.uv
+local buffer = require("nvim-tcp.buffer")
 local network = require("nvim-tcp.network")
 local server = require("nvim-tcp.server")
-local buffer = require("nvim-tcp.buffer")
 local ui = require("nvim-tcp.ui")
 
 local M = {}
@@ -48,6 +48,7 @@ local function handle_list_req(client_id)
 			and not f:match("^%.git")
 			and not f:match("^build")
 			and not f:match("^%.env")
+			and not f:match("^%.venv")
 		then
 			table.insert(filtered, f)
 		end
@@ -368,27 +369,51 @@ function M.server_join(ip, sync_dir)
 			print("Joined the server at " .. host)
 			network.send_json("NAME", { name = name })
 
-			-- Prevent opening netrw, and instead fetch remote files
-			vim.api.nvim_create_autocmd("FileType", {
-				pattern = "netrw",
-				callback = function()
-					if M.role == "CLIENT" then
-						-- Close netrw buffer
-						local buf = vim.api.nvim_get_current_buf()
-						vim.schedule(function()
-							pcall(vim.api.nvim_buf_delete, buf, { force = true })
-						end)
+			local function hijack_func()
+				M.remote_files()
+			end
+			-- Override netrw commands to open remote files instead
+			-- TODO: Add sexplore and vexplore
+			vim.api.nvim_create_user_command("Ex", hijack_func, { force = true })
+			vim.api.nvim_create_user_command("Explore", hijack_func, { force = true })
 
-						vim.defer_fn(function()
-							-- Eat any pending input, this fixes a very starnge issue where telescope search field
-							-- get filled with couple of A characters, thats also why the defer_fn with small delay exits
-							while vim.fn.getchar(0) ~= 0 do
+			-- Hijack all regular dir bufs
+			local hijack_group = vim.api.nvim_create_augroup("RemoteNetrwHijack", { clear = true })
+
+			vim.api.nvim_create_autocmd("BufEnter", {
+				group = hijack_group,
+				pattern = "*",
+				callback = function()
+					if M.role ~= "CLIENT" then
+						return
+					end
+
+					-- Check if it's a directory OR if Netrw managed to sneak in
+					local is_dir = vim.fn.isdirectory(vim.fn.expand("%:p")) == 1
+					local is_netrw = vim.bo.filetype == "netrw"
+
+					if is_dir or is_netrw then
+						local buf = vim.api.nvim_get_current_buf()
+
+						vim.schedule(function()
+							if vim.api.nvim_buf_is_valid(buf) then
+								-- Force delete the buffer so we don't get "unsaved changes" warnings
+								pcall(vim.api.nvim_buf_delete, buf, { force = true })
 							end
 							M.remote_files()
-						end, 50)
+						end)
 					end
 				end,
 			})
+
+			-- If netrw is already open replace it
+			vim.schedule(function()
+				if vim.bo.filetype == "netrw" or vim.fn.isdirectory(vim.fn.expand("%:p")) == 1 then
+					local buf = vim.api.nvim_get_current_buf()
+					pcall(vim.api.nvim_buf_delete, buf, { force = true })
+					M.remote_files()
+				end
+			end)
 		end)
 	end)
 end
