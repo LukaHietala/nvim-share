@@ -467,10 +467,21 @@ function M.server_join(ip, sync_dir)
 			local function hijack_func()
 				M.remote_files()
 			end
+
 			-- Override netrw commands to open remote files instead
-			-- TODO: Add sexplore and vexplore
-			vim.api.nvim_create_user_command("Ex", hijack_func, { force = true })
-			vim.api.nvim_create_user_command("Explore", hijack_func, { force = true })
+			local netrw_commands = {
+				"Ex",
+				"Explore",
+				"Sexplore",
+				"Vexplore",
+				"Texplore",
+				"Hexplore",
+				"Lexplore",
+			}
+
+			for _, cmd in ipairs(netrw_commands) do
+				vim.api.nvim_create_user_command(cmd, hijack_func, { force = true })
+			end
 
 			-- Hijack all regular dir bufs
 			local hijack_group = vim.api.nvim_create_augroup("RemoteNetrwHijack", { clear = true })
