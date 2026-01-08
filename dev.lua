@@ -18,8 +18,8 @@ vim.opt.packpath:prepend(data_dir .. "/nvim/site")
 vim.opt.rtp:prepend(vim.fn.getcwd())
 
 vim.pack.add({
-  'https://github.com/nvim-lua/plenary.nvim',
-  'https://github.com/nvim-telescope/telescope.nvim'
+	"https://github.com/nvim-lua/plenary.nvim",
+	"https://github.com/nvim-telescope/telescope.nvim",
 })
 
 print("In dev environment: " .. dev_root)
