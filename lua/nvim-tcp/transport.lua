@@ -7,29 +7,37 @@ M.next_id = 1
 
 -- Line buffering wrapper, reads content from socket
 local function create_reader(client, callback)
-	local buffer = ""
+	local chunks = {}
 
 	client:read_start(function(err, chunk)
 		if err then
-			print(err)
 			client:close()
 			return
 		end
 
 		if chunk then
-			buffer = buffer .. chunk
-			-- Process all complete lines in the buffer
+			table.insert(chunks, chunk)
+			local buffer = table.concat(chunks)
+			local start_pos = 1
+
 			while true do
-				local line, rest = buffer:match("(.-)\n(.*)")
-				if line then
-					callback(line)
-					buffer = rest
+				local newline_pos = string.find(buffer, "\n", start_pos, true)
+				if newline_pos then
+					local line = string.sub(buffer, start_pos, newline_pos - 1)
+
+					vim.schedule(function()
+						callback(line)
+					end)
+
+					start_pos = newline_pos + 1
 				else
 					break
 				end
 			end
+
+			-- Store the leftover partial line back into the chunks table
+			chunks = { string.sub(buffer, start_pos) }
 		else
-			-- No chunk means the client closed the connection
 			client:close()
 		end
 	end)
