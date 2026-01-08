@@ -41,9 +41,9 @@ function M.apply_changes(path, change)
 		local old_count = old_end_row - start_row
 		local delta = new_count - old_count
 
-		-- Only shift cursor if we are valid and the cursor is BELOW the change
+		-- Only shift cursor if we are valid and the cursor is below or at the change
 		-- cursor[1] is 1-based, start_row is 0-based.
-		if cursor and start_row < (cursor[1] - 1) then
+		if cursor and start_row <= (cursor[1] - 1) then
 			line_offset = delta
 		end
 
