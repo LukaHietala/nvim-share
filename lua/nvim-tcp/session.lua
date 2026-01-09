@@ -9,6 +9,10 @@ M.config = {
 	port = 8080,
 	sync_to_disk = false,
 	name = "Jaakko",
+	cursor_name = {
+		pos = "right_align",
+		hl_group = "Cursor"
+	}
 }
 
 M.state = {
@@ -195,18 +199,23 @@ function handlers.CURSOR(client_id, payload)
 	
 	-- If in currently opened buffer
 	if path ==  vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":.") then
-		vim.api.nvim_buf_set_extmark(0, M.state.cursor_namespace, row, col, 
-			{ 
+		local options = { 
 				id = mark_id,
 				end_col = col + 1,
 				hl_group = 'TermCursor',
 				virt_text = {
-					{name, 'Cursor'}, -- Cursor for visibility
+					{name, M.config.cursor_name.hl_group}, -- Cursor for visibility
 				},
-				virt_text_win_col = col + 2,
 				strict = false,
 			}
-		)
+		-- Position config
+		if M.config.cursor_name.pos == "follow" then
+			options.virt_text_win_col = col + 2
+		else 
+			options.virt_text_pos = M.config.cursor_name.pos
+		end
+
+		vim.api.nvim_buf_set_extmark(0, M.state.cursor_namespace, row, col, options)
 	else -- Try to delete just in case we changed files halfway through
 		vim.api.nvim_buf_del_extmark(0, M.state.cursor_namespace, mark_id)
 	end
