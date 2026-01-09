@@ -16,6 +16,7 @@ M.state = {
 	clients = {}, -- ID -> Metadata, like name
 	pending_changes = {}, -- Path -> { content, client_id }
 	snapshot = {}, -- Path -> Last known clean content
+	cursor_namespace = vim.api.nvim_create_namespace('share-cursor') -- Not sure where else
 }
 
 -- About snapshots:
@@ -30,6 +31,15 @@ local function broadcast(path, content, sender_id)
 	for id, _ in pairs(M.state.clients) do
 		if id ~= sender_id then
 			transport.send_to(id, "UPDATE", { path = path, content = content })
+		end
+	end
+end
+
+-- Sends arbitrary data to every client other than sender
+local function broadcast_data(cmd, payload, sender_id)
+	for id, _ in pairs(M.state.clients) do
+		if id ~= sender_id then
+			transport.send_to(id, cmd, payload)
 		end
 	end
 end
@@ -79,6 +89,25 @@ function handlers.FILE_RES(_, payload)
 		-- Create a scratch buffer for client to put file contents to
 		local buf = buffer_utils.create_scratch_buf(path, content)
 
+		-- Add listener for cursor movement
+		vim.api.nvim_create_autocmd("CursorMoved", {
+			desc = "Notifies host when cursor is moved",
+			callback = function(ev)
+				local current_id = 1
+				local pos = vim.api.nvim_win_get_cursor(0)
+				data = {
+					path = "kisu",
+					position = pos,
+					id = nil, 
+					name = nil
+					-- id and names are tracked by host so they will get added later
+					-- when this message passes through the host
+				}
+				-- Broadcast to host, who will inform others
+				transport.send_json("CLIENTCURSOR", data)
+			end,
+		})
+
 		-- Attach listener for subsequent edits, if so send update to host that contains updated content
 		buffer_utils.attach_listener(buf, function(p, c)
 			transport.send_json("UPDATE", { path = p, content = c })
@@ -89,7 +118,7 @@ function handlers.FILE_RES(_, payload)
 	end)
 end
 
--- Event received by client or host that contains updated content
+-- Event received by host that contains updated content, this is forwarded to other clients
 function handlers.UPDATE(client_id, payload)
 	local path = payload.path
 	local content = payload.content
@@ -125,7 +154,8 @@ function handlers.UPDATE(client_id, payload)
 				M.state.pending_changes[path] = nil
 			end
 		end
-
+		
+		-- Forward changes to every client except the one who made the changes
 		broadcast(path, content, client_id)
 	end)
 end
@@ -141,6 +171,37 @@ function handlers.NAME(client_id, payload)
 	end
 
 	print(message)
+end
+
+-- Event recieved by host that informs of client cursor position
+function handlers.CLIENTCURSOR(client_id, payload)
+	-- Add id from client_id
+	payload.id = client_id
+	-- Add name stored by host to data
+	payload.name = M.state.clients[client_id].name
+	-- Broadcast data to every client
+	broadcast_data("CURSOR", payload, client_id)
+	-- Manually run CURSOR handler so host can see cursor as well
+	handlers.CURSOR(client_id, payload)
+end
+
+-- Event recieved by host or client that contains cursor position
+function handlers.CURSOR(client_id, payload)
+	local row = payload.position[1] - 1
+	local col = payload.position[2]
+	local name = payload.name
+	vim.api.nvim_buf_set_extmark(0, M.state.cursor_namespace, row, col, 
+		{ 
+			id = payload.id + 1, -- host id is 0 which is not allowed :)
+			end_col = col + 1,
+			hl_group = 'TermCursor',
+			virt_text = {
+				{name, 'Cursor'}, -- Cursor for visibility
+			},
+			virt_text_win_col = col + 2,
+			strict = false,
+		}
+	)
 end
 
 -- Executes correct handler above based on server message
@@ -199,6 +260,21 @@ function M.start_host()
 			})
 		end,
 	})
+	-- Track mouse movement and inform all clients
+	vim.api.nvim_create_autocmd("CursorMoved", {
+		desc = "Notifies clients when cursor is moved",
+		callback = function(ev)
+			local pos = vim.api.nvim_win_get_cursor(0)
+			data = {
+				path = "kisu",
+				position = pos,
+				id = 0, -- Host is id 0 (essentially)
+				name = "host"
+			}
+			-- Broadcast to all clients
+			broadcast_data("CURSOR", data, 0)
+		end,
+	})
 end
 
 function M.join_server(ip)
@@ -209,6 +285,7 @@ function M.join_server(ip)
 	transport.connect(ip, M.config.port, function(cmd, data)
 		M.process_msg(nil, cmd, data)
 	end)
+
 
 	M.state.role = "CLIENT"
 	transport.send_json("NAME", { name = M.config.name })
