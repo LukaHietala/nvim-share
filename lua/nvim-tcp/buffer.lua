@@ -6,18 +6,12 @@ M.attached = {}
 -- Prevent infinite loops
 M.is_applying = false
 
--- Reads file and returns content
 function M.read_file(path)
-	local file = io.open(path, "r")
-	if not file then
-		return nil
-	end
-	local content = file:read("*a")
-	file:close()
-	return content
+    local lines = vim.fn.readfile(path)
+	local content = table.concat(lines, "\n")
+    return content
 end
 
--- Write to file safely
 function M.write_file(path, content)
 	if type(content) ~= "string" then
 		return
@@ -28,7 +22,7 @@ function M.write_file(path, content)
 		vim.fn.mkdir(dir, "p")
 	end
 
-	local fd = uv.fs_open(path, "w", 438) -- 438 is octal 0666 on linux
+	local fd = uv.fs_open(path, "w", tonumber("644", 8))
 	if fd then
 		uv.fs_write(fd, content, -1)
 		uv.fs_close(fd)
