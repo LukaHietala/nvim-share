@@ -6,8 +6,6 @@ Dirty and unreliable Neovim plugin for realtime buffer sharing using TCP
 require("nvim-tcp").setup({
     -- The port to run the server on
 	port = 8080,            
-    -- Whether to sync the host's files on your computer
-	sync_to_disk = false,   
     -- Your name visible to other clients
 	name = "Jaakko",        
 	cursor_name = {

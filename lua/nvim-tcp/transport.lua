@@ -1,121 +1,120 @@
 local uv = vim.uv
 local M = {}
 
-M.socket = nil
-M.clients = {} -- For server mode: id -> client_socket
+-- TCP handle (server or client)
+M.handle = nil
+-- List of alive clients { id: handle } (handle being TCP one)
+M.clients = {}
+-- For clients, auto increment ids
 M.next_id = 1
 
--- Line buffering wrapper, reads content from socket
-local function create_reader(client, callback)
-	local chunks = {}
-
-	client:read_start(function(err, chunk)
-		if err then
-			client:close()
-			return
-		end
-
-		if chunk then
-			table.insert(chunks, chunk)
-			local buffer = table.concat(chunks)
-			local start_pos = 1
-
-			while true do
-				local newline_pos = string.find(buffer, "\n", start_pos, true)
-				if newline_pos then
-					local line = string.sub(buffer, start_pos, newline_pos - 1)
-
-					vim.schedule(function()
-						callback(line)
-					end)
-
-					start_pos = newline_pos + 1
-				else
-					break
-				end
-			end
-
-			-- Store the leftover partial line back into the chunks table
-			chunks = { string.sub(buffer, start_pos) }
-		else
-			client:close()
-		end
-	end)
-end
--- Doesn't crash if invalid json
-local function safe_json(str)
+-- Decodes json safely
+local function decode_json(str)
 	local ok, res = pcall(vim.json.decode, str)
 	return ok and res or nil
 end
 
--- Writes command and payload to spesified socket
-function M.send_to(id, cmd, payload)
-	local msg = vim.json.encode({ cmd = cmd, data = payload })
-	if M.clients[id] then
-		M.clients[id]:write("0:" .. msg .. "\n") -- 0 indicates payload from host
-	elseif M.socket then
-		-- We are client sending to host, or host sending to specific client
-		if M.clients[id] then
-			M.clients[id]:write(msg .. "\n")
+local function attach_line_reader(socket, callback)
+	-- Collect streamed data to chunks
+	local chunks = {}
+	socket:read_start(function(err, chunk)
+		-- Close the socket on error or disconnect
+		if err or not chunk then
+			socket:close()
+			return
 		end
-	end
+
+		-- Add read chunk to cunks
+		table.insert(chunks, chunk)
+
+		-- Combine chunks to string for processing
+		local buffer = table.concat(chunks)
+		local start_pos = 1
+
+		-- Get all full lines from buffer
+		while true do
+			-- Find next newline char from start pos
+			local newline_pos = string.find(buffer, "\n", start_pos, true)
+			-- If no newline found break the loop for now and resume collecting chunks
+			if not newline_pos then
+				break
+			end
+
+			-- Get full line between start and end pos
+			local line = string.sub(buffer, start_pos, newline_pos - 1)
+			-- Put full line to queue for other logic to use in main thread
+			vim.schedule(function()
+				callback(line)
+			end)
+			-- Move one to the next line
+			start_pos = newline_pos + 1
+		end
+		-- Cleanup processed lines
+		chunks = { string.sub(buffer, start_pos) }
+	end)
 end
 
-function M.send_json(cmd, payload)
+-- Send data to spesified client
+function M.send(cmd, payload, id)
 	local msg = vim.json.encode({ cmd = cmd, data = payload }) .. "\n"
-	if M.socket then
-		M.socket:write(msg)
+
+	if M.clients[id] then
+		-- As server, send to spesified client
+		-- 0 indicates it comes from host
+		M.clients[id]:write("0:" .. msg)
+	elseif M.handle and not next(M.clients) then
+		-- If handle and no clients list assume we are client
+		M.handle:write(msg)
 	end
 end
 
--- Start a Host
-function M.start_server(port, on_msg, on_event)
-	M.socket = uv.new_tcp()
-	M.socket:bind("0.0.0.0", port)
-	M.socket:listen(128, function(err)
+function M.start_server(port, on_msg, on_connect)
+	-- Start server TCP server
+	M.handle = uv.new_tcp()
+	M.handle:bind("0.0.0.0", port)
+	M.handle:listen(128, function(err)
 		if err then
 			return print("Listen error: " .. err)
 		end
 
+		-- Accept new clients
 		local client = uv.new_tcp()
-		M.socket:accept(client)
+		M.handle:accept(client)
 
+		-- Add newly connected client
 		local id = M.next_id
 		M.next_id = M.next_id + 1
 		M.clients[id] = client
 
-		if on_event then
-			on_event("CONNECT", id)
+		-- Notify on_connect callback
+		if on_connect then
+			on_connect(id, true)
 		end
 
-		create_reader(client, function(line)
-			-- Host routing
-			local target, payload = line:match("^(%d+):(.*)")
-			if target then
-				-- If p2p later
-			else
-				-- Message for host
-				local decoded = safe_json(line)
-				if decoded then
-					on_msg(id, decoded.cmd, decoded.data)
-				end
+		attach_line_reader(client, function(line)
+			-- targetId:payload" If targetIs is missing, it's for host
+			local target, body = line:match("^(%d+):(.*)")
+			-- Try to decode body with target or just line without target
+			local decoded = decode_json(body or line)
+			if decoded then
+				on_msg(id, decoded.cmd, decoded.data)
 			end
 		end)
 	end)
 end
 
--- Join as client
-function M.connect(host, port, on_msg)
-	M.socket = uv.new_tcp()
-	M.socket:connect(host, port, function(err)
+-- Client connects to host and starts listening to it
+function M.connect_to_host(host, port, on_msg)
+	M.handle = uv.new_tcp()
+	M.handle:connect(host, port, function(err)
 		if err then
-			return print("Connect error")
+			return print("Connection failed")
 		end
 
-		create_reader(M.socket, function(line)
-			-- Client might receive "0:JSON" (from host) or just json
+		attach_line_reader(M.handle, function(line)
+			-- Strip target if present ("0:{...}")
 			local _, body = line:match("^(%d+):(.*)")
-			local decoded = safe_json(body or line)
+			local decoded = decode_json(body or line)
 			if decoded then
 				on_msg(decoded.cmd, decoded.data)
 			end
@@ -124,8 +123,8 @@ function M.connect(host, port, on_msg)
 end
 
 function M.close()
-	if M.socket then
-		M.socket:close()
+	if M.handle then
+		M.handle:close()
 	end
 	for _, c in pairs(M.clients) do
 		c:close()

@@ -7,7 +7,6 @@ local M = {}
 -- Default config
 M.config = {
 	port = 8080,
-	sync_to_disk = false,
 	name = "Jaakko",
 	cursor_name = {
 		pos = "right_align",
@@ -30,20 +29,11 @@ M.state = {
 -- Host saves: Snapshot "Paksu turkkinen pomeranian" - Pending nil (clean, new baseline)
 -- Snapshots are source of truth
 
--- Sends file path and content to every socketm other than sender
-local function broadcast(path, content, sender_id)
-	for id, _ in pairs(M.state.clients) do
-		if id ~= sender_id then
-			transport.send_to(id, "UPDATE", { path = path, content = content })
-		end
-	end
-end
-
 -- Sends arbitrary data to every client other than sender
-local function broadcast_data(cmd, payload, sender_id)
+local function broadcast(cmd, payload, sender_id)
 	for id, _ in pairs(M.state.clients) do
 		if id ~= sender_id then
-			transport.send_to(id, cmd, payload)
+			transport.send(cmd, payload, id)
 		end
 	end
 end
@@ -53,14 +43,14 @@ local handlers = {}
 -- Event to host by cliet to ask for filetree to send to client that requested it
 function handlers.LIST_REQ(client_id)
 	local files = buffer_utils.scan_dir()
-	transport.send_to(client_id, "FILE_LIST", files)
+	transport.send("FILE_LIST", files, client_id)
 end
 
 -- Event received by client after LIST_REQ that contains host's filetree
 function handlers.FILE_LIST(_, payload)
 	vim.schedule(function()
 		ui.show_remote_files(payload, function(path)
-			transport.send_json("GET_REQ", { path = path })
+			transport.send("GET_REQ", { path = path })
 		end)
 	end)
 end
@@ -75,7 +65,7 @@ function handlers.GET_REQ(client_id, payload)
 			or buffer_utils.read_file(path)
 
 		if content then
-			transport.send_to(client_id, "FILE_RES", { path = path, content = content })
+			transport.send("FILE_RES", { path = path, content = content }, client_id)
 		end
 	end)
 end
@@ -84,10 +74,6 @@ end
 function handlers.FILE_RES(_, payload)
 	local path = payload.path
 	local content = payload.content
-
-	if M.config.sync_to_disk then
-		buffer_utils.write_file(path, content)
-	end
 
 	vim.schedule(function()
 		-- Create a scratch buffer for client to put file contents to
@@ -108,16 +94,13 @@ function handlers.FILE_RES(_, payload)
 					-- when this message passes through the host
 				}
 				-- Broadcast to host, who will inform others
-				transport.send_json("CLIENTCURSOR", data)
+				transport.send("CLIENTCURSOR", data)
 			end,
 		})
 
 		-- Attach listener for subsequent edits, if so send update to host that contains updated content
-		buffer_utils.attach_listener(buf, function(p, c)
-			transport.send_json("UPDATE", { path = p, content = c })
-			if M.config.sync_to_disk then
-				buffer_utils.write_file(p, c)
-			end
+		buffer_utils.attach_change_listener(buf, function(p, c)
+			transport.send("UPDATE", { path = p, content = c })
 		end)
 	end)
 end
@@ -129,11 +112,21 @@ function handlers.UPDATE(client_id, payload)
 
 	vim.schedule(function()
 		-- Apply to live buffer if open
-		local applied_live = buffer_utils.apply_patch(path, content)
+		local applied_live = buffer_utils.apply_patch_to_buf(path, content)
 
 		-- Build full text for caching/saving
-		local full_text = applied_live and buffer_utils.get_buffer_content(path)
-			or buffer_utils.reconstruct_text(path, content, M.state.pending_changes[path])
+		local full_text
+		if applied_live then
+			full_text = buffer_utils.get_buffer_content(path)
+		else
+			local pending = M.state.pending_changes[path]
+			local base_text = (pending and pending.content)
+				or M.state.snapshot[path]
+				or buffer_utils.read_file(path)
+				or ""
+
+			full_text = buffer_utils.patch_text(base_text, content)
+		end
 
 		-- Update snapshot (cache)
 		if full_text then
@@ -160,7 +153,7 @@ function handlers.UPDATE(client_id, payload)
 		end
 
 		-- Forward changes to every client except the one who made the changes
-		broadcast(path, content, client_id)
+		broadcast("UPDATE", { path = path, content = content }, client_id)
 	end)
 end
 
@@ -184,7 +177,7 @@ function handlers.CLIENTCURSOR(client_id, payload)
 	-- Add name stored by host to data
 	payload.name = M.state.clients[client_id].name
 	-- Broadcast data to every client
-	broadcast_data("CURSOR", payload, client_id)
+	broadcast("CURSOR", payload, client_id)
 	-- Manually run CURSOR handler so host can see cursor as well
 	handlers.CURSOR(client_id, payload)
 end
@@ -235,12 +228,10 @@ function M.start_host()
 
 	transport.start_server(M.config.port, function(client_id, cmd, data)
 		M.process_msg(client_id, cmd, data)
-	end, function(event, id)
-		if event == "CONNECT" then
+	end, function(id, connected)
+		if connected then
 			-- TODO: use config
 			M.state.clients[id] = { name = "Host" }
-		elseif event == "DISCONNECT" then
-			M.state.clients[id] = nil
 		end
 	end)
 
@@ -256,14 +247,14 @@ function M.start_host()
 			local pending = M.state.pending_changes[rel]
 			if pending then
 				vim.schedule(function()
-					buffer_utils.apply_patch(ev.file, pending.content)
+					buffer_utils.apply_patch_to_buf(ev.file, pending.content)
 					print("Applied pending changes for " .. rel .. "to current buffer")
 				end)
 			end
 
 			-- Attach listeners
-			buffer_utils.attach_listener(ev.buf, function(p, c)
-				broadcast(p, c, nil)
+			buffer_utils.attach_change_listener(ev.buf, function(p, c)
+				broadcast("UPDATE", { path = p, content = c }, nil)
 			end)
 
 			-- On save, update the snapshot (clean state)
@@ -290,7 +281,7 @@ function M.start_host()
 				name = "host",
 			}
 			-- Broadcast to all clients
-			broadcast_data("CURSOR", data, 0)
+			broadcast("CURSOR", data, 0)
 		end,
 	})
 end
@@ -300,12 +291,12 @@ function M.join_server(ip)
 		return print("Already joined")
 	end
 
-	transport.connect(ip, M.config.port, function(cmd, data)
+	transport.connect_to_host(ip, M.config.port, function(cmd, data)
 		M.process_msg(nil, cmd, data)
 	end)
 
 	M.state.role = "CLIENT"
-	transport.send_json("NAME", { name = M.config.name })
+	transport.send("NAME", { name = M.config.name })
 	print("Connected to " .. ip)
 end
 
@@ -313,7 +304,7 @@ function M.list_remote_files()
 	if M.state.role ~= "CLIENT" then
 		return print("Only clients can request files")
 	end
-	transport.send_json("LIST_REQ", {})
+	transport.send("LIST_REQ", {})
 end
 
 function M.review_pending()

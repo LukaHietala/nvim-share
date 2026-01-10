@@ -1,7 +1,9 @@
 local uv = vim.uv
 local M = {}
 
-M.attached = {} -- Keep track attached buffers
+-- Keep track attached buffers
+M.attached = {}
+-- Prevent infinite loops
 M.is_applying = false
 
 -- Reads file and returns content
@@ -95,6 +97,7 @@ function M.get_buffer_content(path)
 	return nil
 end
 
+-- Create a fake (scratch) buffer that acts like regular file
 function M.create_scratch_buf(path, content)
 	local buf = vim.fn.bufnr(path)
 	if buf == -1 then
@@ -104,6 +107,8 @@ function M.create_scratch_buf(path, content)
 		-- Swapfiles cause major headaches so forcefully GET THEM OUT
 		vim.bo[buf].swapfile = false
 		vim.cmd("silent! keepalt file " .. vim.fn.fnameescape(path))
+	else
+		vim.api.nvim_set_current_buf(buf)
 	end
 
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(content, "\n"))
@@ -126,47 +131,33 @@ function M.create_scratch_buf(path, content)
 	return buf
 end
 
--- Reconstructs file content from a diff/patch without a buffer
-function M.reconstruct_text(path, change, pending_data)
+-- Merges an partial update into a base text string (without a buffer)
+function M.patch_text(base_text, change)
+	-- If full sync, just return the whole thing
 	if type(change) == "string" then
 		return change
-	end -- Full file sent
-
-	-- Get base
-	local text = (pending_data and pending_data.content) or M.read_file(path) or ""
-	local lines = vim.split(text, "\n")
-
-	-- Not that useful docs: https://neovim.io/doc/user/api.html#nvim_buf_attach()
-	local start_idx = change.first + 1
-	local end_idx = change.old_last
-	local new_lines = change.lines
-
-	-- How this works:
-	-- lines: {"katti", "mirri", "hauva", "koira"}
-	-- If we replace "mirri" and "hauva" (2-3) with "kissakoira":
-	-- 1. (1 to start_idx - 1) Take everything before index 2 -> {"katti"}
-	-- 2. (new_lines) Add the new lines -> {"kissakoira"}
-	-- 3. (end_idx + 1 to #lines) Take everything after index 3 -> {"koira"}
-	-- Result: {"katti", "kissakoira", "koira"}
-
-	local res = {}
-	-- Add lines before the change
-	for i = 1, start_idx - 1 do
-		table.insert(res, lines[i])
-	end
-	-- Add the new/changed lines
-	for _, l in ipairs(new_lines) do
-		table.insert(res, l)
-	end
-	-- Add lines after the change
-	for i = end_idx + 1, #lines do
-		table.insert(res, lines[i])
 	end
 
-	return table.concat(res, "\n")
+	local lines = vim.split(base_text, "\n")
+	local result = {}
+
+	-- Lines before the change
+	for i = 1, change.first do
+		table.insert(result, lines[i])
+	end
+	-- New lines
+	for _, line in ipairs(change.lines) do
+		table.insert(result, line)
+	end
+	-- Lines after the change
+	for i = change.old_last + 1, #lines do
+		table.insert(result, lines[i])
+	end
+
+	return table.concat(result, "\n")
 end
 
-function M.apply_patch(path, change)
+function M.apply_patch_to_buf(path, change)
 	local buf = vim.fn.bufnr(path)
 	-- Check buffer validity
 	if buf == -1 or not vim.api.nvim_buf_is_loaded(buf) then
@@ -201,7 +192,7 @@ function M.apply_patch(path, change)
 end
 
 -- Listens buffer for changes and in on_change callback return THE EXACT changes, so no need to push the whole litany of text
-function M.attach_listener(buf, on_change)
+function M.attach_change_listener(buf, on_change)
 	if M.attached[buf] then
 		return
 	end
