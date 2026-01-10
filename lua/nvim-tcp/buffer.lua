@@ -28,13 +28,12 @@ function M.write_file(path, content)
 		vim.fn.mkdir(dir, "p")
 	end
 
-	-- Write (temp + rename)
-	local tmp = path .. ".tmp"
-	local fd = uv.fs_open(tmp, "w", 438) -- 0666 on linux
+	local fd = uv.fs_open(path, "w", 438) -- 438 is octal 0666 on linux
 	if fd then
 		uv.fs_write(fd, content, -1)
 		uv.fs_close(fd)
-		uv.fs_rename(tmp, path)
+	else
+		print("Could not open file for writing" .. path)
 	end
 end
 
