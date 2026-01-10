@@ -6,10 +6,26 @@ M.attached = {}
 -- Prevent infinite loops
 M.is_applying = false
 
+-- Normalize path to root relative, with buf or path
+function M.rel_path(buf_or_path)
+	-- Get path from buf if buf is provided, if no buf use the path
+	local path = type(buf_or_path) == "number" and vim.api.nvim_buf_get_name(buf_or_path)
+		or buf_or_path
+
+	return vim.fn.fnamemodify(path, ":.")
+end
+
 function M.read_file(path)
-	local lines = vim.fn.readfile(path)
-	local content = table.concat(lines, "\n")
-	return content
+	local fd = uv.fs_open(path, "r", tonumber("644", 8))
+	if not fd then
+		return nil
+	end
+
+	local stat = uv.fs_fstat(fd)
+	local data = uv.fs_read(fd, stat.size, 0)
+	uv.fs_close(fd)
+
+	return data
 end
 
 function M.write_file(path, content)
@@ -27,7 +43,7 @@ function M.write_file(path, content)
 		uv.fs_write(fd, content, -1)
 		uv.fs_close(fd)
 	else
-		print("Could not open file for writing" .. path)
+		print("Could not open file for writing " .. path)
 	end
 end
 
@@ -85,7 +101,7 @@ function M.get_buffer_content(path)
 	if buf ~= -1 and vim.api.nvim_buf_is_loaded(buf) then
 		-- Get lines and return full content
 		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-		return table.concat(lines, "\n")
+		return table.concat(lines, "\n") .. "\n"
 	end
 	return nil
 end
@@ -190,7 +206,7 @@ function M.attach_change_listener(buf, on_change)
 		return
 	end
 
-	local path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ":.")
+	local path = M.rel_path(buf)
 
 	-- Attach listner to the buffer
 	vim.api.nvim_buf_attach(buf, false, {
