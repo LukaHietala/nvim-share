@@ -22,13 +22,6 @@ M.state = {
 	cursor_namespace = vim.api.nvim_create_namespace("share-cursor"), -- Not sure where else
 }
 
--- About snapshots:
--- Initial load: Snapshot "Pullea pomeranian" - Pending nil (clean)
--- Client edits: Snapshot "Pullea pomeranian" - Pending "Paksu turkkinen pomeranian" (dirty, in review)
--- Client undos: Snapshot "Pullea pomeranian" - Pending nil | (clean)
--- Host saves: Snapshot "Paksu turkkinen pomeranian" - Pending nil (clean, new baseline)
--- Snapshots are source of truth
-
 local handlers = {}
 
 -- Event to host by cliet to ask for filetree to send to client that requested it
@@ -85,7 +78,7 @@ function handlers.FILE_RES(_, payload)
 					-- when this message passes through the host
 				}
 				-- Broadcast to host, who will inform others
-				transport.send("CLIENTCURSOR", data)
+				transport.send("CURSOR", data)
 			end,
 		})
 
@@ -161,20 +154,15 @@ function handlers.NAME(client_id, payload)
 	print(message)
 end
 
--- Event recieved by host that informs of client cursor position
-function handlers.CLIENTCURSOR(client_id, payload)
-	-- Add id from client_id
-	payload.id = client_id
-	-- Add name stored by host to data
-	payload.name = M.state.clients[client_id].name
-	-- Broadcast data to every client
-	transport.broadcast("CURSOR", payload, client_id)
-	-- Manually run CURSOR handler so host can see cursor as well
-	handlers.CURSOR(client_id, payload)
-end
-
 -- Event recieved by host or client that contains cursor position
 function handlers.CURSOR(client_id, payload)
+	if M.state.role == "HOST" then
+		payload.id = client_id
+		payload.name = M.state.clients[client_id] and M.state.clients[client_id].name or "?"
+
+		transport.broadcast("CURSOR", payload, client_id)
+	end
+
 	local row = payload.position[1] - 1
 	local col = payload.position[2]
 	local name = payload.name
@@ -182,7 +170,7 @@ function handlers.CURSOR(client_id, payload)
 	local mark_id = payload.id + 1 -- host id is 0 which is not allowed :)
 
 	-- If in currently opened buffer
-	if path == vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":.") then
+	if path == buffer_utils.rel_path(0) then
 		local options = {
 			id = mark_id,
 			end_col = col + 1,
@@ -232,7 +220,7 @@ function M.start_host()
 	-- Auto share local buffers on open
 	vim.api.nvim_create_autocmd("BufReadPost", {
 		callback = function(ev)
-			local rel = vim.fn.fnamemodify(ev.file, ":.")
+			local rel = buffer_utils.rel_path(ev.file)
 
 			-- If we have pending changes for this file, apply them now
 			local pending = M.state.pending_changes[rel]
@@ -264,9 +252,9 @@ function M.start_host()
 		desc = "Notifies clients when cursor is moved",
 		callback = function()
 			local pos = vim.api.nvim_win_get_cursor(0)
-			local relative_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":.")
+			local path = buffer_utils.rel_path(0)
 			local data = {
-				path = relative_path,
+				path = path,
 				position = pos,
 				id = 0, -- Host is id 0 (essentially)
 				name = "host",
