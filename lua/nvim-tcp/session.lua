@@ -18,7 +18,6 @@ M.state = {
 	role = nil, -- "HOST" or "CLIENT"
 	clients = {}, -- ID -> Metadata, like name
 	pending_changes = {}, -- Path -> { content, client_id }
-	snapshot = {}, -- Path -> Last known clean content
 	cursor_namespace = vim.api.nvim_create_namespace("share-cursor"), -- Not sure where else
 }
 
@@ -92,52 +91,25 @@ end
 -- Event received by host that contains updated content, this is forwarded to other clients
 function handlers.UPDATE(client_id, payload)
 	local path = payload.path
-	local content = payload.content
+	local change = payload.content
 
 	vim.schedule(function()
-		-- Apply to live buffer if open
-		local applied_live = buffer_utils.apply_patch_to_buf(path, content)
+		-- Get the "base" text to apply the patch to
+		-- Existing cache (pending) > live buffer > disk
+		local base_text = (M.state.pending_changes[path] and M.state.pending_changes[path].content)
+			or buffer_utils.get_buffer_content(path)
+			or buffer_utils.read_file(path)
+			or ""
 
-		-- Build full text for caching/saving
-		local full_text
-		if applied_live then
-			full_text = buffer_utils.get_buffer_content(path)
-		else
-			local pending = M.state.pending_changes[path]
-			local base_text = (pending and pending.content)
-				or M.state.snapshot[path]
-				or buffer_utils.read_file(path)
-				or ""
+		-- Apply the patch to the full text string
+		local full_text = buffer_utils.patch_text(base_text, change)
 
-			full_text = buffer_utils.patch_text(base_text, content)
-		end
+		-- Update pending chnages to include new stuff
+		M.state.pending_changes[path] = { content = full_text, client_id = client_id }
+		-- If buffer is open apply to it
+		buffer_utils.apply_patch_to_buf(path, change)
 
-		-- Update snapshot (cache)
-		if full_text then
-			-- Init snapshot if missing
-			if not M.state.snapshot[path] then
-				M.state.snapshot[path] = buffer_utils.read_file(path) or ""
-			end
-
-			-- Check for drift/dirty state
-			local clean_state = M.state.snapshot[path]
-			-- Normalize newlines
-			if full_text:sub(-1) ~= "\n" then
-				full_text = full_text .. "\n"
-			end
-			if clean_state:sub(-1) ~= "\n" then
-				clean_state = clean_state .. "\n"
-			end
-
-			if full_text ~= clean_state then
-				M.state.pending_changes[path] = { content = full_text, client_id = client_id }
-			else
-				M.state.pending_changes[path] = nil
-			end
-		end
-
-		-- Forward changes to every client except the one who made the changes
-		transport.broadcast("UPDATE", { path = path, content = content }, client_id)
+		transport.broadcast("UPDATE", { path = path, content = change }, client_id)
 	end)
 end
 
@@ -220,14 +192,14 @@ function M.start_host()
 	-- Auto share local buffers on open
 	vim.api.nvim_create_autocmd("BufReadPost", {
 		callback = function(ev)
-			local rel = buffer_utils.rel_path(ev.file)
+			local path = buffer_utils.rel_path(ev.file)
 
 			-- If we have pending changes for this file, apply them now
-			local pending = M.state.pending_changes[rel]
+			local pending = M.state.pending_changes[path]
 			if pending then
 				vim.schedule(function()
 					buffer_utils.apply_patch_to_buf(ev.file, pending.content)
-					print("Applied pending changes for " .. rel .. "to current buffer")
+					print("Applied pending changes for " .. path .. "to current buffer")
 				end)
 			end
 
@@ -240,9 +212,8 @@ function M.start_host()
 			vim.api.nvim_create_autocmd("BufWritePost", {
 				buffer = ev.buf,
 				callback = function()
-					local txt = buffer_utils.get_buffer_content(rel) or ""
-					M.state.snapshot[rel] = txt .. "\n"
-					M.state.pending_changes[rel] = nil
+					-- If host saves clear the pending changes on that buffer
+					M.state.pending_changes[path] = nil
 				end,
 			})
 		end,
@@ -293,7 +264,6 @@ function M.review_pending()
 	ui.review_changes(M.state.pending_changes, function(path, content)
 		buffer_utils.write_file(path, content)
 		M.state.pending_changes[path] = nil
-		M.state.snapshot[path] = content
 		print("Saved " .. path)
 	end)
 end
