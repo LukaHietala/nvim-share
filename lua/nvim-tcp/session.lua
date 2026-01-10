@@ -29,15 +29,6 @@ M.state = {
 -- Host saves: Snapshot "Paksu turkkinen pomeranian" - Pending nil (clean, new baseline)
 -- Snapshots are source of truth
 
--- Sends arbitrary data to every client other than sender
-local function broadcast(cmd, payload, sender_id)
-	for id, _ in pairs(M.state.clients) do
-		if id ~= sender_id then
-			transport.send(cmd, payload, id)
-		end
-	end
-end
-
 local handlers = {}
 
 -- Event to host by cliet to ask for filetree to send to client that requested it
@@ -153,7 +144,7 @@ function handlers.UPDATE(client_id, payload)
 		end
 
 		-- Forward changes to every client except the one who made the changes
-		broadcast("UPDATE", { path = path, content = content }, client_id)
+		transport.broadcast("UPDATE", { path = path, content = content }, client_id)
 	end)
 end
 
@@ -177,7 +168,7 @@ function handlers.CLIENTCURSOR(client_id, payload)
 	-- Add name stored by host to data
 	payload.name = M.state.clients[client_id].name
 	-- Broadcast data to every client
-	broadcast("CURSOR", payload, client_id)
+	transport.broadcast("CURSOR", payload, client_id)
 	-- Manually run CURSOR handler so host can see cursor as well
 	handlers.CURSOR(client_id, payload)
 end
@@ -254,7 +245,7 @@ function M.start_host()
 
 			-- Attach listeners
 			buffer_utils.attach_change_listener(ev.buf, function(p, c)
-				broadcast("UPDATE", { path = p, content = c }, nil)
+				transport.broadcast("UPDATE", { path = p, content = c }, nil)
 			end)
 
 			-- On save, update the snapshot (clean state)
@@ -281,7 +272,7 @@ function M.start_host()
 				name = "host",
 			}
 			-- Broadcast to all clients
-			broadcast("CURSOR", data, 0)
+			transport.broadcast("CURSOR", data, 0)
 		end,
 	})
 end

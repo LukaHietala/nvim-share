@@ -68,6 +68,15 @@ function M.send(cmd, payload, id)
 	end
 end
 
+-- Sends data to every client other than self
+function M.broadcast(cmd, payload, sender_id)
+	for id, _ in pairs(M.clients) do
+		if id ~= sender_id then
+			M.send(cmd, payload, id)
+		end
+	end
+end
+
 function M.start_server(port, on_msg, on_connect)
 	-- Start server TCP server
 	M.handle = uv.new_tcp()

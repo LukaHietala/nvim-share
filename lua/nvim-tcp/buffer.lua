@@ -7,9 +7,9 @@ M.attached = {}
 M.is_applying = false
 
 function M.read_file(path)
-    local lines = vim.fn.readfile(path)
+	local lines = vim.fn.readfile(path)
 	local content = table.concat(lines, "\n")
-    return content
+	return content
 end
 
 function M.write_file(path, content)
